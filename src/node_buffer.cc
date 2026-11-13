@@ -566,19 +566,22 @@ void StringSlice(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = env->isolate();
 
   THROW_AND_RETURN_UNLESS_BUFFER(env, args[0]);
-  ArrayBufferViewContents<char> buffer(args[0]);
-
-  auto buffer_length = buffer.length();
-  const char* data_ptr = buffer.data();
-
   Local<ArrayBufferView> view = args[0].As<ArrayBufferView>();
+  if (view->ByteLength() == 0) return args.GetReturnValue().SetEmptyString();
 
-  if (buffer_length == 0) return args.GetReturnValue().SetEmptyString();
-
+  // Converting the indices can run user code that detaches or shrinks the
+  // buffer, so read the buffer only after both have been converted.
   size_t start = 0;
   size_t end = 0;
   THROW_AND_RETURN_IF_OOB(ParseArrayIndex(env, args[1], 0, &start));
-  THROW_AND_RETURN_IF_OOB(ParseArrayIndex(env, args[2], buffer_length, &end));
+  THROW_AND_RETURN_IF_OOB(
+      ParseArrayIndex(env, args[2], view->ByteLength(), &end));
+
+  ArrayBufferViewContents<char> buffer(args[0]);
+  const size_t buffer_length = buffer.length();
+  const char* data_ptr = buffer.data();
+
+  if (buffer_length == 0) return args.GetReturnValue().SetEmptyString();
   if (end <= start) return args.GetReturnValue().SetEmptyString();
   THROW_AND_RETURN_IF_OOB(Just(end <= buffer_length));
   size_t length = end - start;
@@ -679,12 +682,21 @@ void Fill(const FunctionCallbackInfo<Value>& args) {
   Local<Context> ctx = env->context();
 
   THROW_AND_RETURN_UNLESS_BUFFER(env, args[0]);
-  SPREAD_BUFFER_ARG(args[0], ts_obj);
 
   size_t start = 0;
   THROW_AND_RETURN_IF_OOB(ParseArrayIndex(env, args[2], 0, &start));
   size_t end;
   THROW_AND_RETURN_IF_OOB(ParseArrayIndex(env, args[3], 0, &end));
+
+  // Coerce a value that is neither a Buffer nor a string before reading the
+  // buffer: Uint32Value() can run user code that detaches or shrinks it.
+  uint32_t val = 0;
+  if (!Buffer::HasInstance(args[1]) && !args[1]->IsString() &&
+      !args[1]->Uint32Value(ctx).To(&val)) {
+    return;
+  }
+
+  SPREAD_BUFFER_ARG(args[0], ts_obj);
 
   size_t fill_length = end - start;
   Local<String> str_obj;
@@ -704,10 +716,8 @@ void Fill(const FunctionCallbackInfo<Value>& args) {
     goto start_fill;
   }
 
-  // Then coerce everything that's not a string.
+  // Then fill with the value coerced above if it is not a string.
   if (!args[1]->IsString()) {
-    uint32_t val;
-    if (!args[1]->Uint32Value(ctx).To(&val)) return;
     int value = val & 255;
     memset(ts_obj_data + start, value, fill_length);
     return;
@@ -774,7 +784,6 @@ void StringWrite(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
   THROW_AND_RETURN_UNLESS_BUFFER(env, args[0]);
-  SPREAD_BUFFER_ARG(args[0], ts_obj);
 
   THROW_AND_RETURN_IF_NOT_STRING(env, args[1], "argument");
 
@@ -787,13 +796,21 @@ void StringWrite(const FunctionCallbackInfo<Value>& args) {
   size_t max_length = 0;
 
   THROW_AND_RETURN_IF_OOB(ParseArrayIndex(env, args[2], 0, &offset));
-  if (offset > ts_obj_length) {
+  if (offset > args[0].As<ArrayBufferView>()->ByteLength()) {
     return node::THROW_ERR_BUFFER_OUT_OF_BOUNDS(
         env, "\"offset\" is outside of buffer bounds");
   }
 
-  THROW_AND_RETURN_IF_OOB(
-      ParseArrayIndex(env, args[3], ts_obj_length - offset, &max_length));
+  THROW_AND_RETURN_IF_OOB(ParseArrayIndex(
+      env, args[3], std::numeric_limits<size_t>::max(), &max_length));
+
+  // Converting the arguments can run user code that detaches or shrinks the
+  // buffer, so read the buffer only now and check the offset again.
+  SPREAD_BUFFER_ARG(args[0], ts_obj);
+  if (offset > ts_obj_length) {
+    return node::THROW_ERR_BUFFER_OUT_OF_BOUNDS(
+        env, "\"offset\" is outside of buffer bounds");
+  }
 
   max_length = std::min(ts_obj_length - offset, max_length);
 
@@ -1929,7 +1946,6 @@ void SlowWriteString(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
   THROW_AND_RETURN_UNLESS_BUFFER(env, args[0]);
-  SPREAD_BUFFER_ARG(args[0], ts_obj);
 
   THROW_AND_RETURN_IF_NOT_STRING(env, args[1], "argument");
 
@@ -1942,13 +1958,21 @@ void SlowWriteString(const FunctionCallbackInfo<Value>& args) {
   size_t max_length = 0;
 
   THROW_AND_RETURN_IF_OOB(ParseArrayIndex(env, args[2], 0, &offset));
-  if (offset > ts_obj_length) {
+  if (offset > args[0].As<ArrayBufferView>()->ByteLength()) {
     return node::THROW_ERR_BUFFER_OUT_OF_BOUNDS(
         env, "\"offset\" is outside of buffer bounds");
   }
 
-  THROW_AND_RETURN_IF_OOB(
-      ParseArrayIndex(env, args[3], ts_obj_length - offset, &max_length));
+  THROW_AND_RETURN_IF_OOB(ParseArrayIndex(
+      env, args[3], std::numeric_limits<size_t>::max(), &max_length));
+
+  // Converting the arguments can run user code that detaches or shrinks the
+  // buffer, so read the buffer only now and check the offset again.
+  SPREAD_BUFFER_ARG(args[0], ts_obj);
+  if (offset > ts_obj_length) {
+    return node::THROW_ERR_BUFFER_OUT_OF_BOUNDS(
+        env, "\"offset\" is outside of buffer bounds");
+  }
 
   max_length = std::min(ts_obj_length - offset, max_length);
 
